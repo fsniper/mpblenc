@@ -1,0 +1,142 @@
+<?php 
+
+echo "\nDirectory Encoder for blenc v0.0.1\n";
+
+$longopts  = array(
+    "target:",
+    "source:",
+    "exclude::", 
+    "copyexcludes::",
+    "copy::",
+    "keyfile::",
+);
+
+$options = getopt("", $longopts);
+if (!$options) {
+     echo "\n";
+     echo "Usage: " . $_SERVER["argv"][0] . " --target TARGETPATH --source SOURCEPATH [--exclude EXCLUDE_PATTERNS_CSV] [--copy y|n] [--copyexcludes y|n] [--keyfile KEYFILE]";
+     echo "\n\n";
+     echo "If no keyfile is given or it\'s empty a new one will be created.\n";
+     echo "\texclude patterns are sample globs seperated by commas\n";
+     echo "\t--copy=y\t\tcopy unencoded files to target\n";
+     echo "\t--copyexcludes=y\t\twill copy excluded files to target\n";
+     die(255);
+}
+
+$options['copyexcludes'] = !(isset($options['copyexcludes']) && $options['copyexcludes'] == 'n');
+$options['copy'] = !(isset($options['copy']) && $options['copy'] == 'n');
+$options['exclude'] = isset($options['exclude']) ? explode(',', $options['exclude']) : [];
+
+$options['keyfile'] = isset($options['keyfile']) ? $options['keyfile'] : tempnam($options['target'], '__blenc.keyfile-');
+$options['generate'] = false;
+if (!file_exists($options['keyfile']) || !stat($options['keyfile'])['size']) {
+    $options['generate'] = true;
+    echo "A new keyfile will be generated as $options[keyfile]\n";
+}
+
+function clear_script($str) {
+    return preg_replace( '/^<\?php|<\?/', '', preg_replace('/\?>$/', '', trim($str), 1), 1);
+}
+
+function encodefile($sfile, $tfile) {
+    global $options;
+    $NOWDOC_START = ""; //"\$__BLENC_SCRIPT__ = <<<'BLENC_SCRIPT'\n";
+    $NOWDOC_END = "" ;//"\nBLENC_SCRIPT;\n";
+    createdirs($sfile, $tfile);
+
+    if ($options['generate']) {
+        $key = md5(time());
+        
+        $redistributable_key = blenc_encrypt($NOWDOC_START . clear_script(file_get_contents($sfile)). $NOWDOC_END, $tfile . '.blenc', $key);
+
+        file_put_contents($options['keyfile'], $key);
+        file_put_contents($options['keyfile'] . '.redist', $redistributable_key);
+
+        $options['generate'] = false;
+
+    } else {
+        $redistributable_key = blenc_encrypt($NOWDOC_START . clear_script(file_get_contents($sfile)). $NOWDOC_END, $tfile . '.blenc', file_get_contents($options['keyfile']));
+        if (!isset($redist) && !file_exists($options['keyfile'] . '.redist')) {
+            $redist = true;
+            file_put_contents($options['keyfile'] . '.redist', $redistributable_key);
+        }
+    }
+    $f = str_replace($options['target'] . '/', '', $tfile);
+    file_put_contents($tfile, "<?php include('/etc/php5/blenc.config.php'); include(\$__BLENC_ROOT__ . '/$f.blenc');"); // eval(\$__BLENC_SCRIPT__); ? >");
+
+}
+
+
+function is_excluded($file) {
+    global $options;
+    static $empty_ = false;
+    if ($empty_) { 
+        return false;
+    } else {
+        if (count($options['exclude'])) {
+            foreach($options['exclude'] as $pattern) {
+                if (fnmatch($file, $pattern)) {
+                    return true;
+                }
+            }
+        } else {
+            $empty_ = true;
+        }
+    }
+    return false;
+
+}
+function targetize($path) {
+    global $options;
+    return $options['target'] . str_replace($options['source'], '', $path);
+}
+function createdirs($source, $target) {
+    if (is_file($source)) {
+        $t = dirname($target);
+    } else {
+        $t = $target;
+    }
+    if (!file_exists($t)) {
+        mkdir($t, 0755, true);
+    }
+}
+function fullcopy($source, $target) {
+    createdirs($source, $target);
+    copy($source, $target);
+}
+
+function encodedir($origin){
+    global $options;
+    $cwd = dir($origin);
+    while($entry = $cwd->read()){
+        $fullpath = $origin . '/' . $entry;
+
+        if($entry != "." && $entry != "..") {
+            if (is_excluded($fullpath)) {
+                echo "Excluded Path: $fullpath \n";
+                if ($options['copyexcludes']) {
+                    fullcopy($fullpath, targetize($entry));
+                }
+            } else {
+                if(is_dir($origin."/".$entry)){
+                    encodedir($fullpath);
+                }
+                else{
+                    if (preg_match('/.php$/',  $fullpath)) {
+                        encodefile($fullpath, targetize($fullpath) );
+                    } else {
+                        if ($options['copy']) {
+                            fullcopy($fullpath, targetize($fullpath) );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    $cwd->close();
+}
+
+
+encodedir($options['source'], $options);
+
+?>
